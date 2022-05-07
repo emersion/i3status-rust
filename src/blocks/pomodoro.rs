@@ -184,6 +184,10 @@ impl ConfigBlock for Pomodoro {
 }
 
 impl Block for Pomodoro {
+    fn name(&self) -> &'static str {
+        "pomodoro"
+    }
+
     fn update(&mut self) -> Result<Option<Update>> {
         self.set_text();
         match &self.state {
