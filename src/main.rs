@@ -25,12 +25,13 @@ use std::time::Duration;
 use clap::{crate_authors, crate_description, App, Arg, ArgMatches};
 use crossbeam_channel::{select, Receiver, Sender};
 
-use crate::blocks::Block;
 use crate::config::{Config, SharedConfig};
 use crate::errors::*;
-use crate::protocol::i3bar_event::{process_events, I3BarEvent};
+use crate::protocol::i3bar_event::{process_events, I3BarEvent, MouseButton};
 use crate::scheduler::{Task, UpdateScheduler};
+use crate::signals::convert_to_valid_signal;
 use crate::signals::process_signals;
+use crate::subprocess::spawn_child_async;
 use crate::util::deserialize_file;
 use crate::widgets::text::TextWidget;
 use crate::widgets::{I3BarWidget, State};
@@ -128,7 +129,8 @@ fn run(matches: &ArgMatches) -> Result<()> {
     let shared_config = SharedConfig::new(&config);
 
     // Initialize the blocks
-    let mut blocks: Vec<Box<dyn Block>> = Vec::new();
+    let mut blocks = Vec::new();
+    let mut block_event_handlers = Vec::new();
     for (block_name, block_config) in config.blocks {
         let block = block_name
             .create_block(
@@ -139,8 +141,9 @@ fn run(matches: &ArgMatches) -> Result<()> {
             )
             .in_block(block_name.name())?;
 
-        if let Some(block) = block {
+        if let Some((block, handlers)) = block {
             blocks.push(block);
+            block_event_handlers.push(handlers);
         }
     }
 
@@ -167,7 +170,15 @@ fn run(matches: &ArgMatches) -> Result<()> {
             recv(rx_clicks) -> res => if let Ok(event) = res {
                 if let Some(id) = event.id {
                     let block = blocks.get_mut(id).error_msg("could not get required block")?;
-                    block.click(&event).in_block(block.name())?;
+                    let handlers = block_event_handlers.get_mut(id).error_msg("could not get required block")?;
+                    match &handlers.on_click {
+                        Some(on_click) if event.button == MouseButton::Left => {
+                            spawn_child_async("sh", &["-c", on_click]).error_msg("could not spawn child").in_block(block.name())?;
+                        }
+                        _ => {
+                            block.click(&event).in_block(block.name())?;
+                        }
+                    }
                     protocol::print_blocks(&blocks, &shared_config)?;
                 }
             },
@@ -208,8 +219,11 @@ fn run(matches: &ArgMatches) -> Result<()> {
                     _ => {
                         //Real time signal that updates only the blocks listening
                         //for that signal
-                        for block in blocks.iter_mut() {
-                            block.signal(sig).in_block(block.name())?;
+                        let sig = convert_to_valid_signal(sig)?;
+                        for (block, handlers) in blocks.iter_mut().zip(&block_event_handlers) {
+                            if handlers.signal == Some(sig) {
+                                block.update().in_block(block.name())?;
+                            }
                         }
                     },
                 };
